@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+	Fallback styles: these approximate a small subset of Tailwind utility
+	classes so the UI is usable during development without a Tailwind
+	build step (the CDN is also included in public/index.html).
+*/
+:root{
+	--blue-600:#2563eb;
+	--gray-100:#f7fafc;
+	--gray-700:#4a5568;
+	--gray-800:#2d3748;
+}
+
+/* Layout helpers */
+.container{max-width:1024px;padding-left:1rem;padding-right:1rem;margin-left:auto;margin-right:auto}
+.mx-auto{margin-left:auto;margin-right:auto}
+.min-h-screen{min-height:100vh}
+.bg-gray-100{background:var(--gray-100)}
+.bg-white{background:#ffffff}
+.p-6{padding:1.5rem}
+.p-4{padding:1rem}
+.p-2{padding:.5rem}
+.px-4{padding-left:1rem;padding-right:1rem}
+.py-8{padding-top:2rem;padding-bottom:2rem}
+.mt-8{margin-top:2rem}
+.mb-4{margin-bottom:1rem}
+.text-center{text-align:center}
+
+/* Card / box */
+.rounded{border-radius:.5rem}
+.rounded-l{border-top-left-radius:.25rem;border-bottom-left-radius:.25rem}
+.rounded-r{border-top-right-radius:.25rem;border-bottom-right-radius:.25rem}
+
+/* Minimal motion utility for subtle enter animations */
+@keyframes subtle-pop{0%{transform:scale(.98);opacity:0}100%{transform:scale(1);opacity:1}}
+.animate-subtle-pop{animation:subtle-pop .18s ease-out both}
+.shadow{box-shadow:0 6px 18px rgba(0,0,0,0.08)}
+.border{border:1px solid #e2e8f0}
+
+/* Width helpers */
+.w-full{width:100%}
+.max-w-md{max-width:28rem}
+.max-w-2xl{max-width:42rem}
+.h-64{height:16rem}
+.overflow-y-auto{overflow-y:auto}
+
+/* Flex helpers */
+.flex{display:flex}
+.flex-1{flex:1}
+.justify-between{justify-content:space-between}
+.items-center{align-items:center}
+.space-x-4 > * + *{margin-left:1rem}
+
+/* Typography */
+.text-2xl{font-size:1.5rem;line-height:1.25}
+.text-4xl{font-size:2.25rem}
+.text-lg{font-size:1.125rem}
+.font-bold{font-weight:700}
+.text-gray-700{color:var(--gray-700)}
+.text-white{color:#ffffff}
+
+/* Buttons */
+.bg-blue-600{background:var(--blue-600)}
+.bg-gray-800{background:var(--gray-800)}
+.bg-gray-600{background:#4a5568}
+.text-white{color:#fff}
+.underline{text-decoration:underline}
+.hover\:underline:hover{text-decoration:underline}
+
+/* Button utility */
+.btn {display:inline-block;padding:.5rem 1rem;border-radius:.375rem;font-weight:600}
+.btn-primary{background:var(--blue-600);color:#fff}
+.btn-secondary{background:#edf2f7;color:#1a202c}
+.btn-danger{background:#e53e3e;color:#fff}
+
+/* Forms */
+input[type="text"],input[type="email"],input[type="password"],textarea{
+	border:1px solid #e2e8f0;border-radius:.25rem;padding:.5rem;width:100%;box-sizing:border-box
+}
+
+/* Utility */
+.rounded-l{border-top-left-radius:.25rem;border-bottom-left-radius:.25rem}
+.rounded-r{border-top-right-radius:.25rem;border-bottom-right-radius:.25rem}

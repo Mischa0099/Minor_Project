@@ -1,0 +1,147 @@
+from flask import Flask
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+import os
+from dotenv import load_dotenv
+
+from db import db, init_mongo
+
+# Load environment variables from .env (if present)
+load_dotenv()
+
+def create_app():
+    app = Flask(__name__)
+
+    # Configuration
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key')
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', 'sqlite:///instance/database.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Determine database backend: default SQLAlchemy, optional MongoDB when USE_MONGO=1
+USE_MONGO = os.getenv('USE_MONGO', '0').lower() in ('1', 'true', 'yes')
+
+if USE_MONGO:
+    try:
+        from db import init_mongo
+        init_mongo(app)
+        print('Using MongoDB backend:', os.getenv('MONGO_URI', 'mongodb://127.0.0.1:27017'))
+    except Exception as e:
+         print('MongoDB initialization failed:', e)
+else:
+    # Initialize SQLAlchemy normally
+    db.init_app(app)
+
+    # Initialize other extensions
+    JWTManager(app)
+    CORS(app)
+
+    # Import and register blueprints after extensions are initialized
+    try:
+        from routes.auth_routes import auth_bp
+        from routes.user_routes import user_bp
+        from routes.chat_routes import chat_bp
+        from routes.admin_routes import admin_bp
+
+        app.register_blueprint(auth_bp, url_prefix='/api/auth')
+        app.register_blueprint(user_bp, url_prefix='/api/user')
+        app.register_blueprint(chat_bp, url_prefix='/api/chat')
+        app.register_blueprint(admin_bp, url_prefix='/api/admin')
+    except Exception as e:
+        print('Warning: could not register blueprints at import time:', e)
+
+    @app.route('/ping', methods=['GET'])
+    def ping():
+        return 'pong', 200
+
+    return app
+
+
+if __name__ == '__main__':
+    app = create_app()
+    # Create SQL tables only when using SQLAlchemy backend
+    if not (os.getenv('USE_MONGO', '0').lower() in ('1', 'true', 'yes')):
+        with app.app_context():
+            db.create_all()
+    app.run(debug=True, host='0.0.0.0', port=5000)
+from flask import Flask
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+import os
+from dotenv import load_dotenv
+from db import db
+
+# Load environment variables from .env (if present)
+load_dotenv()
+
+app = Flask(__name__)
+
+# Configuration
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key')
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', 'sqlite:///instance/database.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Determine database backend: default SQLAlchemy, optional MongoDB when USE_MONGO=1
+USE_MONGO = os.getenv('USE_MONGO', '0').lower() in ('1', 'true', 'yes')
+
+if USE_MONGO:
+    try:
+        # initialize pymongo client and attach to app (app.mongo_client, app.mongo_db)
+        from db import init_mongo
+        init_mongo(app)
+        print('Using MongoDB backend:', os.getenv('MONGO_URI', 'mongodb://127.0.0.1:27017'))
+    except Exception as e:
+        # If mongo init fails, surface the error but continue to allow debugging
+        print('MongoDB initialization failed:', e)
+else:
+    # Initialize SQLAlchemy normally
+    db.init_app(app)
+
+# Initialize other extensions
+jwt = JWTManager(app)
+CORS(app)
+
+# Import and register blueprints after extensions (imported here so extensions are initialized first)
+from routes.auth_routes import auth_bp
+from routes.user_routes import user_bp
+from routes.chat_routes import chat_bp
+from routes.admin_routes import admin_bp
+
+app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(user_bp, url_prefix='/api/user')
+app.register_blueprint(chat_bp, url_prefix='/api/chat')
+app.register_blueprint(admin_bp, url_prefix='/api/admin')
+
+
+# Simple health endpoint for local dev (no auth)
+@app.route('/ping', methods=['GET'])
+def ping():
+    return 'pong', 200
+
+# Optionally prefetch heavy models in a background thread (set PREFETCH_MODELS=1)
+if os.getenv('PREFETCH_MODELS', '0') in ('1', 'true', 'yes'):
+    try:
+        import threading
+        # import ensure_models_loaded lazily to avoid circular imports during module import
+        from routes.chat_routes import ensure_models_loaded
+
+        def _prefetch():
+            with app.app_context():
+                try:
+                    ensure_models_loaded()
+                    print('Model prefetch completed')
+                except Exception as e:
+                    print('Model prefetch failed:', e)
+
+        t = threading.Thread(target=_prefetch, daemon=True)
+        t.start()
+    except Exception as e:
+        print('PREFETCH_MODELS requested but failed to start prefetch thread:', e)
+
+if __name__ == '__main__':
+    # Create SQL DB tables if they don't exist (skip when using MongoDB)
+    if not USE_MONGO:
+        with app.app_context():
+            db.create_all()
+    app.run(debug=True, host='0.0.0.0', port=5000)

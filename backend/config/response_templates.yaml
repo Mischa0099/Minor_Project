@@ -1,0 +1,10 @@
+positive: |
+  That's wonderful to hear — I'm really glad things are going well for you. If you'd like, tell me more about what's working and I can help you build on it.
+
+negative: |
+  I'm really sorry you're going through that. I hear you — would you like to share more about what's happening? If you'd like, we can try a small grounding exercise together.
+
+neutral: |
+  Thanks for sharing. Can you tell me more or ask a specific question so I can help in a useful way?
+
+# You can add additional keys like 'severity_high' or 'custom' and reference them in the code.

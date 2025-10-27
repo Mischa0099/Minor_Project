@@ -1,0 +1,25 @@
+Flask==2.3.3
+Flask-CORS==4.0.0
+Flask-SQLAlchemy==3.0.5
+Flask-JWT-Extended==4.5.3
+python-dotenv==1.0.0
+Werkzeug==2.3.7
+requests==2.32.5
+
+# Optional MongoDB support
+pymongo==4.5.1
+
+# Optional / ML stack (uncomment/install to enable model-backed chat)
+transformers==4.57.0
+# CPU-only torch wheel is recommended for local dev (installed from PyTorch CPU index)
+# Example install command for CPU: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
+# If you want to pin a wheel in requirements, use the correct cp version for your Python.
+# Below we reference the generic torch package; installer will resolve appropriate wheel.
+torch
+accelerate==1.10.1
+google-generativeai==0.8.5
+numpy==2.3.3
+
+# Notes:
+# - Installing the ML stack will download model weights (hundreds of MB). Use the lazy loaders to avoid blocking startup.
+# - To force local text generation, set env USE_LOCAL_MODEL=1. To enable Gemini, set GOOGLE_API_KEY and USE_GENAI=1.
