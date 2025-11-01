@@ -26,6 +26,7 @@ def get_profile():
         'name': profile.name,
         'age': profile.age,
         'gender': profile.gender,
+        'weight': profile.weight,
         'health_conditions': profile.health_conditions,
         'birthmarks': profile.birthmarks,
         # ADDED fields
@@ -56,6 +57,7 @@ def update_profile():
     profile.name = data.get('name', profile.name)
     profile.age = data.get('age', profile.age)
     profile.gender = data.get('gender', profile.gender)
+    profile.weight = data.get('weight', profile.weight)
     profile.health_conditions = data.get('health_conditions', profile.health_conditions)
     profile.birthmarks = data.get('birthmarks', profile.birthmarks)
     # ADDED fields

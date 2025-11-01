@@ -161,7 +161,8 @@ def ensure_profile_response_style(app):
 		COLUMNS_TO_ADD = [
 			('response_style', 'VARCHAR(20) DEFAULT "concise"'),
 			('family_medication_history', 'TEXT'),
-			('previous_medication_history', 'TEXT')
+			('previous_medication_history', 'TEXT'),
+			('weight', 'REAL')
 		]
 
 		migrated = False

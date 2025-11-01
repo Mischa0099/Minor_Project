@@ -31,6 +31,7 @@ class Profile(db.Model):
     name = db.Column(db.String(100))
     age = db.Column(db.Integer)
     gender = db.Column(db.String(20))
+    weight = db.Column(db.Float)  # Weight in kg
     health_conditions = db.Column(db.Text)
     birthmarks = db.Column(db.Text)
     # User preference for AI response style: 'concise' or 'detailed'

@@ -39,6 +39,7 @@ const Login = () => {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-transparent transition duration-150"
+            placeholder="your@email.com"
             required
           />
         </div>
@@ -50,6 +51,7 @@ const Login = () => {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-transparent transition duration-150"
+            placeholder="Enter your password"
             required
           />
         </div>
@@ -60,6 +62,9 @@ const Login = () => {
       {message && <p className={`mt-4 text-center p-2 rounded ${
         message.includes('successful') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
       }`}>{message}</p>}
+      <p className="mt-4 text-center text-sm text-gray-600">
+        Don't have an account? <a href="/register" className="text-blue-600 hover:underline">Register here</a>
+      </p>
     </div>
   );
 };

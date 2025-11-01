@@ -1,4 +1,5 @@
 # backend/routes/chat_routes.py
+from fastapi import FastAPI, HTTPException
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 import warnings
@@ -14,6 +15,8 @@ from datetime import datetime
 # We'll set these at runtime inside ensure_models_loaded() to avoid blocking imports at app startup
 HAS_TRANSFORMERS = False
 HAS_GENAI = False
+HAS_OPENAI = False
+HAS_OLLAMA = False
 pipeline = None
 torch = None
 genai = None
@@ -22,8 +25,10 @@ genai = None
 
 # Initialize placeholders for lazy loading
 sentiment_pipeline = None
-chat_session = None
-text_generator = None
+chat_session = None  # Gemini session
+openai_client = None  # OpenAI client
+ollama_base_url = None  # Ollama base URL
+text_generator = None  # Local transformers model
 _models_loaded = False
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), '..', 'config', 'response_templates.yaml')
 response_templates = {}
@@ -31,17 +36,32 @@ response_templates = {}
 USE_LOCAL_MODEL = os.getenv('USE_LOCAL_MODEL', 'false').lower() in ('1', 'true', 'yes')
 # Default to False for development safety; enable by setting USE_GENAI=1 in your environment
 USE_GENAI = os.getenv('USE_GENAI', 'false').lower() in ('1', 'true', 'yes')
+# AI Provider Configuration
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')  # or 'gpt-4' for better quality
+OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'mistral')  # Default to mistral (smaller, uses less memory). Options: 'llama2', 'mistral', 'phi', 'tinyllama'
+OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')
 
 
 def ensure_models_loaded():
-    """Load models on first use. This keeps app startup quick and downloads happen only when needed."""
+    """Load models on first use. This keeps app startup quick and downloads happen only when needed.
+    Priority order: OpenAI > Ollama > Gemini > Local transformers"""
     global sentiment_pipeline, chat_session, text_generator, _models_loaded
-    if _models_loaded:
+    global openai_client, ollama_base_url
+    global HAS_OPENAI, HAS_OLLAMA, HAS_GENAI, HAS_TRANSFORMERS, pipeline, torch, genai
+    
+    # Always re-check, don't return early - this allows checking status
+    # But only initialize once to avoid repeated API calls
+    if _models_loaded and (HAS_OPENAI or HAS_OLLAMA or HAS_GENAI or text_generator):
+        # Already loaded and has a provider, just return
         return
+    
+    if _models_loaded:
+        # Models were loaded but no provider found, try again
+        print("🔄 Re-checking AI providers...")
+    
     _models_loaded = True
 
     # Lazy import transformers/torch if available
-    global HAS_TRANSFORMERS, HAS_GENAI, pipeline, torch, genai
     try:
         from transformers import pipeline as _pipeline
         import torch as _torch
@@ -78,7 +98,60 @@ def ensure_models_loaded():
                 print('Failed to load local text-generation model:', e)
                 text_generator = None
 
-    # Lazy import Google Generative AI if available
+    # PRIORITY 1: Lazy import OpenAI (most stable, recommended)
+    try:
+        from openai import OpenAI
+        api_key = os.getenv('OPENAI_API_KEY')
+        if api_key and api_key.strip():
+            try:
+                openai_client = OpenAI(api_key=api_key)
+                # Test the client by checking if it's properly initialized
+                HAS_OPENAI = True
+                print(f'✅ OpenAI configured (lazy) - Model: {OPENAI_MODEL}')
+            except Exception as init_error:
+                HAS_OPENAI = False
+                openai_client = None
+                print(f'❌ OpenAI initialization failed: {init_error}')
+        else:
+            print('ℹ️ OPENAI_API_KEY not set or empty. OpenAI will be skipped.')
+            HAS_OPENAI = False
+            openai_client = None
+    except ImportError:
+        HAS_OPENAI = False
+        openai_client = None
+        print('ℹ️ OpenAI package not installed. Install with: pip install openai')
+    except Exception as e:
+        HAS_OPENAI = False
+        openai_client = None
+        print(f"❌ Could not initialize OpenAI: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # PRIORITY 2: Ollama (local, free, no API key needed)
+    # Always check Ollama as it can be a fallback even if OpenAI is available
+    try:
+        import requests
+        # Test if Ollama is available
+        test_url = f"{OLLAMA_BASE_URL}/api/tags"
+        response = requests.get(test_url, timeout=2)
+        if response.status_code == 200:
+            ollama_base_url = OLLAMA_BASE_URL
+            HAS_OLLAMA = True
+            print(f'✅ Ollama configured (lazy) - Base URL: {OLLAMA_BASE_URL}, Model: {OLLAMA_MODEL}')
+        else:
+            HAS_OLLAMA = False
+            ollama_base_url = None
+            print(f'ℹ️ Ollama not available at {OLLAMA_BASE_URL} (status: {response.status_code}). Install from https://ollama.ai')
+    except requests.exceptions.ConnectionError:
+        HAS_OLLAMA = False
+        ollama_base_url = None
+        print(f'ℹ️ Ollama not running at {OLLAMA_BASE_URL}. Start Ollama or install from https://ollama.ai')
+    except Exception as e:
+        HAS_OLLAMA = False
+        ollama_base_url = None
+        print(f'ℹ️ Ollama check failed: {type(e).__name__}: {e}. Install from https://ollama.ai')
+
+    # PRIORITY 3: Lazy import Google Generative AI if available
     try:
         import google.generativeai as _genai
         genai = _genai
@@ -91,7 +164,7 @@ def ensure_models_loaded():
             # Check for API key before configuring
             api_key = os.getenv('GOOGLE_API_KEY')
             if not api_key:
-                print('❌ GOOGLE_API_KEY not set. Gemini generation will be skipped.')
+                print('ℹ️ GOOGLE_API_KEY not set. Gemini generation will be skipped.')
                 chat_session = None
             else:
                 genai.configure(api_key=api_key)
@@ -163,45 +236,129 @@ def analyze_sentiment(text):
     return 'NEUTRAL', 50.0
 
 def get_user_profile_context(user_id):
-    """Fetches user profile and formats it as a single string for the AI to use as context."""
+    """Fetches user profile and formats it as a comprehensive personalized context for the AI."""
     context = ""
     try:
         from models import Profile
         profile = Profile.query.filter_by(user_id=user_id).first()
         if profile:
-            # Gather all relevant fields, including the new medication history
-            profile_data = {
-                'Name': profile.name,
-                'Age': profile.age,
-                'Gender': profile.gender,
-                'Health Conditions': profile.health_conditions,
-                'Birthmarks': profile.birthmarks,
-                'Family Med History': profile.family_medication_history,
-                'Previous Med History': profile.previous_medication_history,
-                'Response Style': profile.response_style
-            }
-            # Filter out empty/None values and build context string
-            context_parts = []
-            for k, v in profile_data.items():
-                # Only include fields with actual data
-                if v and str(v).strip().lower() not in ('none', 'n/a', ''):
-                    context_parts.append(f"{k}: {v}")
-            context = " | ".join(context_parts)
+            # Build a detailed, structured profile context for personalization
+            profile_sections = []
+            
+            # Basic demographics
+            if profile.name:
+                profile_sections.append(f"Patient Name: {profile.name}")
+            if profile.age:
+                profile_sections.append(f"Age: {profile.age} years")
+            if profile.gender:
+                profile_sections.append(f"Gender: {profile.gender}")
+            if profile.weight:
+                profile_sections.append(f"Weight: {profile.weight} kg")
+            
+            # Health conditions - critical for personalization
+            if profile.health_conditions and str(profile.health_conditions).strip().lower() not in ('none', 'n/a', ''):
+                profile_sections.append(f"\nCurrent Health Conditions:\n{profile.health_conditions}")
+            
+            # Medication history - very important for personalized advice
+            if profile.previous_medication_history and str(profile.previous_medication_history).strip().lower() not in ('none', 'n/a', ''):
+                profile_sections.append(f"\nPatient's Previous Medication History:\n{profile.previous_medication_history}")
+            
+            # Family history - important for risk assessment
+            if profile.family_medication_history and str(profile.family_medication_history).strip().lower() not in ('none', 'n/a', ''):
+                profile_sections.append(f"\nFamily Medication/Medical History:\n{profile.family_medication_history}")
+            
+            # Response style preference
+            response_style = getattr(profile, 'response_style', 'concise') or 'concise'
+            
+            context = "\n".join(profile_sections)
+            
+            # Add a note about response style at the end
+            if context:
+                context += f"\n\nResponse Style Preference: {response_style}"
+                
     except Exception as e:
         print(f"Error fetching profile context for user {user_id}: {e}")
     return context
 
 def generate_rule_based_response(message, sentiment_label, sentiment_score=None, history_text='', profile_context=''):
-    """Generate a response tailored to the sentiment of the user's message, as a fallback."""
+    """Generate a personalized response tailored to the sentiment and user profile, as a fallback when AI is unavailable."""
     ensure_models_loaded()
 
     # Build a practical, health-focused response depending on sentiment
     sentiment_label_up = (sentiment_label or 'NEUTRAL').upper()
 
-    # Derive response style from profile_context if provided (e.g. 'Response Style: detailed')
+    # Extract profile information for personalization
+    user_name = None
+    user_age = None
+    user_weight = None
+    health_conditions = None
+    medication_history = None
+    family_history = None
+    
+    try:
+        if profile_context:
+            # Extract name
+            if 'Patient Name:' in profile_context:
+                try:
+                    user_name = profile_context.split('Patient Name:')[1].split('\n')[0].strip()
+                except:
+                    pass
+            
+            # Extract age
+            if 'Age:' in profile_context:
+                try:
+                    age_str = profile_context.split('Age:')[1].split('years')[0].strip()
+                    user_age = int(age_str) if age_str.isdigit() else None
+                except:
+                    pass
+            
+            # Extract weight
+            if 'Weight:' in profile_context:
+                try:
+                    weight_str = profile_context.split('Weight:')[1].split('kg')[0].strip()
+                    user_weight = float(weight_str) if weight_str.replace('.', '').isdigit() else None
+                except:
+                    pass
+            
+            # Extract health conditions
+            if 'Current Health Conditions:' in profile_context:
+                try:
+                    conditions_section = profile_context.split('Current Health Conditions:')[1]
+                    if '\nPatient' in conditions_section:
+                        health_conditions = conditions_section.split('\nPatient')[0].strip()
+                    elif '\nFamily' in conditions_section:
+                        health_conditions = conditions_section.split('\nFamily')[0].strip()
+                    else:
+                        health_conditions = conditions_section.split('\n\n')[0].strip()
+                except:
+                    pass
+            
+            # Extract medication history
+            if "Patient's Previous Medication History:" in profile_context:
+                try:
+                    med_section = profile_context.split("Patient's Previous Medication History:")[1]
+                    if '\nFamily' in med_section:
+                        medication_history = med_section.split('\nFamily')[0].strip()
+                    else:
+                        medication_history = med_section.split('\n\n')[0].strip()
+                except:
+                    pass
+            
+            # Extract family history
+            if 'Family Medication/Medical History:' in profile_context:
+                try:
+                    family_section = profile_context.split('Family Medication/Medical History:')[1]
+                    family_history = family_section.split('\n\n')[0].strip()
+                except:
+                    pass
+    except Exception as e:
+        print(f"Error parsing profile context: {e}")
+        pass
+
+    # Derive response style from profile_context if provided
     response_style = 'concise'
     try:
-        if 'Response Style: detailed' in profile_context:
+        if 'Response Style Preference: detailed' in profile_context:
             response_style = 'detailed'
     except Exception:
         response_style = 'concise'
@@ -270,13 +427,17 @@ def generate_rule_based_response(message, sentiment_label, sentiment_score=None,
         ])
         red_flags.append("Sudden severe dizziness with difficulty speaking or weakness — seek emergency care.")
 
-    # Tone and construction
+    # Personalized tone and greeting
+    greeting = ""
+    if user_name:
+        greeting = f"Hello {user_name}, "
+    
     if sentiment_label_up.startswith('NEG'):
-        empathic = "I'm sorry you're experiencing this — I hear you."
+        empathic = f"{greeting}I'm sorry you're experiencing this — I hear you."
     elif sentiment_label_up.startswith('POS'):
-        empathic = "I'm glad to hear some positive signs — let's build on that." 
+        empathic = f"{greeting}I'm glad to hear some positive signs — let's build on that."
     else:
-        empathic = "Thanks for sharing — I want to help." 
+        empathic = f"{greeting}Thanks for sharing — I want to help." 
 
     # If message appears to be non-health/relationship/social request and no symptoms detected,
     # provide a generic helpful reply rather than keep asking for symptoms.
@@ -310,8 +471,29 @@ def generate_rule_based_response(message, sentiment_label, sentiment_score=None,
             # short, actionable non-health advice
             main = f"{empathic} {prefix}For questions about friends or relationships, try to be specific about the situation — e.g., what happened, how it made you feel, and what outcome you want. If you'd like, tell me one detail and I can suggest a next step."
         else:
-            # The ORIGINAL generic fallback goes here, but only if no other rule matched
-            main = f"{empathic} {prefix}Could you tell me when this started or how severe it is? A quick detail helps me give a more useful suggestion."
+            # Personalized generic fallback using profile data
+            personalization = ""
+            
+            # Add personalized context based on profile
+            if user_age:
+                if user_age < 18:
+                    personalization += "As someone under 18, "
+                elif user_age > 65:
+                    personalization += "Given your age, "
+            
+            if health_conditions:
+                # Extract first condition for personalization
+                first_condition = health_conditions.split(',')[0].split('.')[0].strip()
+                if first_condition:
+                    personalization += f"and considering you have {first_condition}, "
+            
+            if medication_history:
+                personalization += "I'll keep your medication history in mind. "
+            
+            if not personalization:
+                personalization = "Based on your profile, "
+            
+            main = f"{empathic} {personalization}{prefix}Could you tell me when this started or how severe it is? A quick detail helps me give a more useful suggestion tailored to your situation."
 
         # append red flag hint concisely
         if red_flags:
@@ -320,54 +502,169 @@ def generate_rule_based_response(message, sentiment_label, sentiment_score=None,
         return main
 
 
-def generate_ai_response(message, history_text='', profile_context=''):
-    """Generates a short AI response. Priority: Gemini (if configured) -> local generator. Returns None on failure/disabled."""
+def generate_ai_response(message, history_text='', profile_context='', sentiment_label='NEUTRAL', sentiment_score=50.0):
+    """Generates a personalized AI response based on user profile, medical history, and context.
+    Priority: OpenAI > Ollama > Gemini > Local transformers. Returns None on failure/disabled."""
     ensure_models_loaded()
     
-    # Combine profile and history for better context
-    full_context = ''
-    if profile_context:
-        full_context += f"User Profile Context: {profile_context}\n"
-    if history_text:
-        full_context += f"Recent Chat History:\n{history_text}\n"
+    # Determine response style from profile context
+    response_style = 'concise'
+    if 'Response Style Preference: detailed' in profile_context:
+        response_style = 'detailed'
+    
+    # Build comprehensive personalized prompt
+    system_instructions = """You are a personalized healthcare AI assistant. Your responses MUST be:
+1. PERSONALIZED - Tailored specifically to the patient's profile (age, weight, gender, health conditions, medication history, family history)
+2. CONTEXT-AWARE - Consider all medical history when giving advice
+3. SAFE - Never prescribe medications, always recommend consulting healthcare providers for serious concerns
+4. EMPATHETIC - Match the patient's emotional state based on sentiment analysis
+5. RELEVANT - Stay focused on the patient's specific health context"""
+    
+    # Build the personalized context section
+    personalized_section = ""
+    if profile_context and profile_context.strip():
+        personalized_section = f"""PATIENT PROFILE FOR PERSONALIZATION:
+{profile_context}
 
-    # Construct the final message/prompt for the LLM
-    final_prompt = f"{full_context}User Message: {message}. Provide a health-focused, supportive, and context-aware response within one to three sentences. If a remedy is requested, suggest simple home care or refer to professional advice based on severity."
+IMPORTANT: Use this profile to personalize ALL responses:
+- Consider the patient's age when suggesting remedies (e.g., children vs elderly need different approaches)
+- Consider weight when discussing medication interactions or dosage-related concerns
+- Factor in existing health conditions when giving any advice
+- Consider medication history to avoid suggesting things that might interact with their medications
+- Factor in family medical history for risk assessment
+- Personalize the conversation naturally based on these factors, don't just list generic advice"""
+    else:
+        personalized_section = "Note: Limited patient profile available. Provide general health advice but encourage patient to complete their profile for better personalization."
+    
+    # Build conversation history context
+    history_section = ""
+    if history_text and history_text.strip():
+        history_section = f"""RECENT CONVERSATION HISTORY:
+{history_text}
 
-    # Try Gemini if available and enabled
+Use this history to maintain conversation continuity and context."""
+    
+    # Build sentiment-aware guidance
+    sentiment_guidance = ""
+    if sentiment_label:
+        sentiment_upper = sentiment_label.upper()
+        if sentiment_upper == 'NEGATIVE':
+            sentiment_guidance = f"The patient is expressing negative emotions (sentiment score: {sentiment_score}%). Be extra empathetic, supportive, and reassuring. Focus on understanding and providing comfort while addressing their concerns."
+        elif sentiment_upper == 'POSITIVE':
+            sentiment_guidance = f"The patient seems positive (sentiment score: {sentiment_score}%). Maintain an encouraging, friendly tone and build on their positive state."
+        else:
+            sentiment_guidance = f"The patient's sentiment is neutral. Provide clear, balanced information and support."
+    
+    # Build user message with instructions
+    user_message_content = f"""{personalized_section}
+
+{history_section}
+
+{sentiment_guidance}
+
+CURRENT PATIENT MESSAGE: {message}
+
+INSTRUCTIONS:
+- Provide a personalized response that directly references the patient's specific profile factors (age, weight, health conditions, medication history) when relevant
+- If remedies or suggestions are requested, personalize them based on the patient's age, weight, existing conditions, and medication history
+- Do NOT use generic "if you have X, do Y" statements - instead, speak directly to the patient using their name and specific context
+- For medication or treatment suggestions, always consider potential interactions with their existing medications and conditions
+- Keep responses {response_style} per patient preference, but ensure personalization is never sacrificed
+- Respond naturally as if you know this patient personally, referencing their specific health context when giving advice"""
+
+    # PRIORITY 1: Try OpenAI (most stable, recommended)
+    if HAS_OPENAI and openai_client:
+        try:
+            response = openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_instructions},
+                    {"role": "user", "content": user_message_content}
+                ],
+                temperature=0.7,
+                max_tokens=500
+            )
+            response_text = response.choices[0].message.content.strip()
+            if response_text:
+                return response_text
+        except Exception as e:
+            print(f'OpenAI generation failed: {e}')
+    
+    # PRIORITY 2: Try Ollama (local, free, no API key)
+    if HAS_OLLAMA and ollama_base_url:
+        try:
+            import requests
+            ollama_prompt = f"""{system_instructions}
+
+{user_message_content}
+
+Generate your personalized response now:"""
+            
+            response = requests.post(
+                f"{ollama_base_url}/api/generate",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": ollama_prompt,
+                    "stream": False
+                },
+                timeout=30
+            )
+            if response.status_code == 200:
+                result = response.json()
+                response_text = result.get('response', '').strip()
+                if response_text:
+                    return response_text
+        except Exception as e:
+            print(f'Ollama generation failed: {e}')
+    
+    # PRIORITY 3: Try Gemini if available
     if chat_session:
         try:
-            # Use the AI model with context
-            response = chat_session.send_message(final_prompt)
-            return getattr(response, 'text', str(response)).strip()
-        except Exception as e:
-            print('Gemini generation failed:', e)
+            final_prompt = f"""{system_instructions}
 
-    # Try local generator if configured
+{user_message_content}
+
+Generate your personalized response now:"""
+            
+            response = chat_session.send_message(final_prompt)
+            response_text = getattr(response, 'text', str(response)).strip()
+            
+            if response_text and len(response_text) > 20:
+                return response_text
+        except Exception as e:
+            print(f'Gemini generation failed: {e}')
+
+    # PRIORITY 4: Try local generator if configured (fallback, less ideal for personalization)
     if text_generator:
         try:
-            # Generate a response with increased max_length for quality
+            final_prompt = f"""{system_instructions}
+
+{user_message_content}
+
+Generate your personalized response now:"""
+            
             outputs = text_generator(
                 final_prompt,
-                max_length=150,
+                max_length=200,
                 do_sample=True,
                 top_k=50,
                 top_p=0.95,
                 repetition_penalty=1.2,
                 no_repeat_ngram_size=3,
                 num_return_sequences=1,
+                temperature=0.7,
             )
             if outputs and isinstance(outputs, list):
                 text = outputs[0].get('generated_text') or outputs[0].get('text') or str(outputs[0])
                 # Remove the original prompt which the model might echo
                 text = text.replace(final_prompt, '').strip()
-                # Clean up and keep the first few sentences
+                # Clean up and keep first few sentences
                 sentences = re.split(r'(?<=[.!?])\s+', text)
-                return ' '.join(sentences[:3]).strip()
+                return ' '.join(sentences[:4]).strip()
         except Exception as e:
-            print('Local generation failed:', e)
+            print(f'Local generation failed: {e}')
 
-    # Returns None if both models are unavailable or failed. The calling function handles the final fallback.
+    # Returns None if all providers failed
     return None
 
 
@@ -394,25 +691,110 @@ def chat():
         # If identity wasn't stored as int, leave as-is
         pass
 
-    # 1. Handle Quick Greeting (priority 1) - unchanged logic
+    # 1. Handle Quick Greeting (priority 1) - personalized greeting using AI if available
     try:
-        # Quick greeting detection: if user says 'hi' / 'hello' / 'hey' variants, respond with a short, user-specific greeting
+        # Quick greeting detection: if user says 'hi' / 'hello' / 'hey' variants
         msg_low = (message or '').strip().lower()
         if msg_low and re.match(r"^\s*(hi+|hello|hey|hiya|hii)\b", message, re.IGNORECASE):
-            # try to fetch profile name
-            name = None
-            try:
-                profile = Profile.query.filter_by(user_id=user_id).first()
-                if profile and getattr(profile, 'name', None):
-                    name = profile.name
-            except Exception:
-                name = None
+            # Get profile context for personalized greeting
+            profile_context = get_user_profile_context(user_id)
+            ensure_models_loaded()
+            
+            # Try AI-powered personalized greeting using priority system
+            ai_response = None
+            greeting_prompt = f"""Generate a warm, personalized greeting for this healthcare conversation.
 
-            # Generic greeting requested by user
-            if name:
-                ai_response = f"Hello {name}. How can I help you today?"
-            else:
-                ai_response = "Hi — how can I help you today?"
+PATIENT PROFILE:
+{profile_context if profile_context else 'New patient'}
+
+The patient just said: "{message}"
+
+Create a friendly, personalized greeting that:
+1. Uses their name if available
+2. Acknowledges their profile context naturally (e.g., if they have health conditions, acknowledge readiness to help with their specific needs)
+3. Is warm, professional, and inviting
+4. Keeps it to 1-2 sentences
+5. Sets a supportive tone for a healthcare conversation
+
+Generate the personalized greeting:"""
+            
+            greeting_system = "You are a friendly healthcare AI assistant. Create warm, personalized greetings."
+            
+            try:
+                # Try OpenAI first
+                if HAS_OPENAI and openai_client:
+                    try:
+                        response = openai_client.chat.completions.create(
+                            model=OPENAI_MODEL,
+                            messages=[
+                                {"role": "system", "content": greeting_system},
+                                {"role": "user", "content": greeting_prompt}
+                            ],
+                            temperature=0.8,
+                            max_tokens=150
+                        )
+                        ai_response = response.choices[0].message.content.strip()
+                    except Exception:
+                        pass
+                
+                # Try Ollama if OpenAI failed
+                if not ai_response and HAS_OLLAMA and ollama_base_url:
+                    try:
+                        import requests
+                        response = requests.post(
+                            f"{ollama_base_url}/api/generate",
+                            json={
+                                "model": OLLAMA_MODEL,
+                                "prompt": f"{greeting_system}\n\n{greeting_prompt}",
+                                "stream": False
+                            },
+                            timeout=10
+                        )
+                        if response.status_code == 200:
+                            result = response.json()
+                            ai_response = result.get('response', '').strip()
+                    except Exception:
+                        pass
+                
+                # Try Gemini if others failed
+                if not ai_response and chat_session:
+                    try:
+                        response = chat_session.send_message(greeting_prompt)
+                        ai_response = getattr(response, 'text', str(response)).strip()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            # Fallback to personalized greeting using profile context
+            if not ai_response:
+                # Extract name from profile context
+                name = None
+                if profile_context and 'Patient Name:' in profile_context:
+                    try:
+                        name = profile_context.split('Patient Name:')[1].split('\n')[0].strip()
+                    except:
+                        pass
+                
+                # Try database if not in context
+                if not name:
+                    try:
+                        profile = Profile.query.filter_by(user_id=user_id).first()
+                        if profile and getattr(profile, 'name', None):
+                            name = profile.name
+                    except Exception:
+                        pass
+
+                # Build personalized greeting
+                if name:
+                    # Check for health conditions to make greeting more relevant
+                    has_conditions = profile_context and 'Current Health Conditions:' in profile_context
+                    if has_conditions:
+                        ai_response = f"Hello {name}! I'm here to help you with your health questions. I see you have some health conditions in your profile - I'll keep those in mind when assisting you. How can I help you today?"
+                    else:
+                        ai_response = f"Hello {name}! I'm here to help you with your health questions. How can I assist you today?"
+                else:
+                    ai_response = "Hello! I'm here to help you with your health questions. How can I assist you today?"
 
             sentiment_label, sentiment_score = 'NEUTRAL', 50.0
 
@@ -454,15 +836,97 @@ def chat():
         is_urgent = False
 
     if is_urgent:
-        # escalate immediately
+        # escalate immediately - but still try to personalize the response
         try:
             # treat as severe negative
             sentiment_label = 'NEGATIVE'
             sentiment_score = 95.0
-            ai_response = (
-                "I hear you — it sounds like you're in urgent distress. If you are in immediate danger, please call your local emergency number now (for example, 911 in the US). "
-                "If you are able, consider contacting a crisis line or a trusted person nearby. If you'd like, I can provide local helpline numbers or steps to stay safe right now."
-            )
+            
+            # Try to get personalized urgent response using AI (priority: OpenAI > Ollama > Gemini > Local)
+            profile_context = get_user_profile_context(user_id)
+            ensure_models_loaded()
+            
+            urgent_prompt = f"""URGENT SITUATION - IMMEDIATE RESPONSE NEEDED
+
+PATIENT PROFILE:
+{profile_context if profile_context else 'Limited profile available'}
+
+PATIENT URGENT MESSAGE: {message}
+
+The patient is expressing an urgent need for help. Provide an empathetic, personalized, and immediate response that:
+1. Acknowledges their distress personally (use their name if available)
+2. Provides immediate crisis support information
+3. Takes into account their age, health conditions, and medical history when giving safety advice
+4. Is warm, supportive, and action-oriented
+5. Directs them to immediate help (emergency services, crisis lines)
+6. Keeps it concise but personalized - this is an emergency
+
+Generate an immediate, personalized urgent response:"""
+            
+            # Use the AI response generator with urgent prompt
+            ai_response = None
+            try:
+                # Build system instructions for urgent situation
+                urgent_system = "You are a healthcare AI assistant responding to an urgent crisis situation. Be immediate, empathetic, and action-oriented."
+                
+                # Try OpenAI first (most reliable)
+                if HAS_OPENAI and openai_client:
+                    try:
+                        response = openai_client.chat.completions.create(
+                            model=OPENAI_MODEL,
+                            messages=[
+                                {"role": "system", "content": urgent_system},
+                                {"role": "user", "content": urgent_prompt}
+                            ],
+                            temperature=0.8,
+                            max_tokens=300
+                        )
+                        ai_response = response.choices[0].message.content.strip()
+                    except Exception:
+                        pass
+                
+                # Try Ollama if OpenAI failed
+                if not ai_response and HAS_OLLAMA and ollama_base_url:
+                    try:
+                        import requests
+                        response = requests.post(
+                            f"{ollama_base_url}/api/generate",
+                            json={
+                                "model": OLLAMA_MODEL,
+                                "prompt": f"{urgent_system}\n\n{urgent_prompt}",
+                                "stream": False
+                            },
+                            timeout=15
+                        )
+                        if response.status_code == 200:
+                            result = response.json()
+                            ai_response = result.get('response', '').strip()
+                    except Exception:
+                        pass
+                
+                # Try Gemini if others failed
+                if not ai_response and chat_session:
+                    try:
+                        response = chat_session.send_message(urgent_prompt)
+                        ai_response = getattr(response, 'text', str(response)).strip()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            
+            # Fallback to generic urgent response if AI unavailable
+            if not ai_response:
+                user_name = ""
+                if profile_context and "Patient Name:" in profile_context:
+                    try:
+                        user_name = profile_context.split("Patient Name:")[1].split("\n")[0].strip()
+                    except:
+                        pass
+                
+                if user_name:
+                    ai_response = f"I hear you, {user_name} — it sounds like you're in urgent distress. If you are in immediate danger, please call your local emergency number now (for example, 911 in the US). If you are able, consider contacting a crisis line or a trusted person nearby. I'm here to help you stay safe right now."
+                else:
+                    ai_response = "I hear you — it sounds like you're in urgent distress. If you are in immediate danger, please call your local emergency number now (for example, 911 in the US). If you are able, consider contacting a crisis line or a trusted person nearby. I'm here to help you stay safe right now."
             
             # Save chat history
             chat_entry = ChatHistory(
@@ -517,26 +981,61 @@ def chat():
         history_text = ''
 
 
-    # 5. Generate Response (The CORE FIX for LLM priority)
+    # 5. Generate Response - PRIORITIZE AI (Gemini/Local) for personalized responses
     ai_response = None
     
-    # CHECK 1: Try AI Model (Gemini or Local) first if either is active
+    # Always try AI first if available - it provides personalized responses
+    # Ensure models are loaded and get current status
     ensure_models_loaded()
-    if chat_session or text_generator:
+    
+    # Debug: Print AI provider status
+    print(f"\n🔍 AI Provider Status Check for user {user_id}:")
+    print(f"   HAS_OPENAI: {HAS_OPENAI}, openai_client: {openai_client is not None}")
+    print(f"   HAS_OLLAMA: {HAS_OLLAMA}, ollama_base_url: {ollama_base_url}")
+    print(f"   HAS_GENAI: {HAS_GENAI}, chat_session: {chat_session is not None}")
+    print(f"   USE_GENAI: {USE_GENAI}")
+    print(f"   text_generator: {text_generator is not None}")
+    
+    # Check if any AI provider is available (OpenAI, Ollama, Gemini, or Local)
+    has_ai_provider = (HAS_OPENAI and openai_client) or (HAS_OLLAMA and ollama_base_url) or (chat_session is not None) or (text_generator is not None)
+    
+    if has_ai_provider:
+        print(f"✅ AI provider detected! Attempting to generate personalized response...")
         try:
-            # Call the LLM with full context. It returns a response or None.
+            # Call the LLM with full context including sentiment for personalized response
             ai_response = generate_ai_response(
                 message, 
                 history_text=history_text, 
-                profile_context=profile_context
+                profile_context=profile_context,
+                sentiment_label=sentiment_label,
+                sentiment_score=sentiment_score
             )
+            if ai_response:
+                print(f"✅ Generated personalized AI response for user {user_id}")
+            else:
+                print(f"⚠️ AI provider available but returned None - falling back to rule-based")
         except Exception as e:
-            print("Error during AI model call, falling back to rule-based:", e)
+            print(f"❌ Error during AI model call: {e}")
+            import traceback
+            traceback.print_exc()
             ai_response = None 
+    else:
+        print("⚠️ WARNING: No AI model available. Current status:")
+        print(f"   OpenAI: HAS_OPENAI={HAS_OPENAI}, client={openai_client is not None}")
+        print(f"   Ollama: HAS_OLLAMA={HAS_OLLAMA}, url={ollama_base_url}")
+        print(f"   Gemini: HAS_GENAI={HAS_GENAI}, USE_GENAI={USE_GENAI}, session={chat_session is not None}")
+        print(f"   Local: text_generator={text_generator is not None}")
+        print("\n💡 To enable AI responses:")
+        print("   - Set OPENAI_API_KEY for OpenAI (recommended, most stable)")
+        print("   - Install Ollama (free, local): https://ollama.ai")
+        print("   - Set GOOGLE_API_KEY and USE_GENAI=1 for Gemini")
+        print("   - Set USE_LOCAL_MODEL=1 for local transformers")
 
-    # CHECK 2: If the model response is None, use rule-based fallback
-    if ai_response is None:
+    # CHECK 2: Only use rule-based fallback if AI completely unavailable or failed
+    if ai_response is None or not ai_response.strip():
+        print(f"⚠️ Falling back to rule-based response (less personalized) for user {user_id}")
         # Use rule-based response as the final guaranteed fallback
+        # This is minimal - only used when AI completely unavailable
         ai_response = generate_rule_based_response(
             message, 
             sentiment_label, 
@@ -544,6 +1043,8 @@ def chat():
             history_text, 
             profile_context
         )
+        if ai_response:
+            print(f"⚠️ Used generic rule-based response. Recommend enabling AI (Gemini) for personalized responses.")
     
     # 6. Save to Database
     try:

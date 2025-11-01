@@ -25,16 +25,34 @@ const Chat = () => {
     if (!message.trim()) return;
     setIsSending(true);
 
+    const userMsg = message.trim(); // Save message before clearing
+    
     try {
-      const response = await api.post('/api/chat/', { message });
-      const { ai_response, created_at } = response.data;
-      setChatHistory((h) => [...h, { user: message, ai: ai_response, created_at }]);
+      const response = await api.post('/api/chat/', { message: userMsg });
+      const { ai_response, sentiment, created_at } = response.data;
+      
+      // Clear input immediately for better UX
       setMessage('');
+      
+      // Add both user and AI response
+      setChatHistory((h) => [
+        ...h, 
+        { 
+          user: userMsg, 
+          ai: ai_response || 'No response received', 
+          sentiment: sentiment,
+          created_at: created_at || new Date().toISOString()
+        }
+      ]);
     } catch (error) {
-      console.error(error);
-      alert(error.response?.data?.message || 'Failed to send message');
+      console.error('Chat error:', error);
+      const errorMsg = error.friendlyMessage || error.response?.data?.message || 'Failed to send message. Please check if backend is running.';
+      alert(errorMsg);
+      // Restore message on error so user can retry
+      setMessage(userMsg);
+    } finally {
+      setIsSending(false);
     }
-    setIsSending(false);
   };
 
   const messagesRef = useRef(null);
@@ -64,6 +82,11 @@ const Chat = () => {
         {isLoadingHistory && (
           <div className="text-sm text-gray-500 animate-pulse">Loading your recent messages…</div>
         )}
+        {chatHistory.length === 0 && !isLoadingHistory && (
+          <div className="text-center text-gray-500 py-8">
+            <p>No messages yet. Start a conversation!</p>
+          </div>
+        )}
         {chatHistory.map((chat, index) => (
           <div key={index} className="mb-3">
             <div className="flex justify-end">
@@ -75,6 +98,12 @@ const Chat = () => {
               <div className="w-6 h-6 rounded-full bg-gray-300 flex items-center justify-center text-xs">AI</div>
               <div className="max-w-[80%] rounded-lg px-3 py-2 bg-gray-100 text-gray-900 shadow">
                 {chat.ai}
+                {chat.sentiment && (
+                  <div className="mt-1 text-xs text-gray-500">
+                    Sentiment: {chat.sentiment.label || 'N/A'} 
+                    {chat.sentiment.score && ` (${Math.round(chat.sentiment.score)}%)`}
+                  </div>
+                )}
                 {chat.created_at && (
                   <div className="mt-1 text-xs text-gray-500">{new Date(chat.created_at).toLocaleString()}</div>
                 )}

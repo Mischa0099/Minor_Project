@@ -10,6 +10,7 @@ const Profile = () => {
     name: '',
     age: '',
     gender: '',
+    weight: '',
     health_conditions: '',
     birthmarks: '',
     family_medication_history: '',
@@ -187,6 +188,21 @@ const Profile = () => {
               <option value="Non-Binary">Non-Binary</option>
               <option value="Prefer Not to Say">Prefer Not to Say</option>
             </select>
+          </div>
+
+          {/* Weight Field */}
+          <div className="mb-4">
+            <label className="block text-gray-700 font-semibold mb-2">Weight (kg)</label>
+            <input
+              type="number"
+              name="weight"
+              value={profile.weight}
+              onChange={handleChange}
+              className="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-600 transition duration-150"
+              placeholder="Enter your weight in kilograms"
+              min="1"
+              step="0.1"
+            />
           </div>
 
           {/* Health Conditions */}

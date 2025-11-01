@@ -1,5 +1,5 @@
 # backend/app.py
-from flask import Flask
+from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 import os
@@ -86,6 +86,19 @@ except Exception as e:
 @app.route('/ping', methods=['GET'])
 def ping():
     return 'pong', 200
+
+# List all available routes for debugging
+@app.route('/api/routes', methods=['GET'])
+def list_routes():
+    """Debug endpoint to list all registered routes"""
+    routes = []
+    for rule in app.url_map.iter_rules():
+        routes.append({
+            'endpoint': rule.endpoint,
+            'methods': list(rule.methods),
+            'path': str(rule)
+        })
+    return jsonify({'routes': routes, 'total': len(routes)}), 200
 
 # Prefetch models optional section (keeps existing behavior)
 if os.getenv('PREFETCH_MODELS', '0') in ('1', 'true', 'yes'):
